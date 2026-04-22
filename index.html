@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Tracker">
+  <meta name="theme-color" content="#1a4a2e">
+  <title>Accountability Tracker</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { background: #f8fafc; overflow-x: hidden; font-family: 'Quicksand', sans-serif; }
+    @keyframes creatureFloat { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+    @keyframes creaturePulse { 0% { transform: scale(1); } 50% { transform: scale(1.15); } 100% { transform: scale(1); } }
+    @keyframes particleRise { 0% { transform: translateY(0); opacity: 0.6; } 100% { transform: translateY(-120px); opacity: 0; } }
+    @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes completeCelebrate { 0% { transform: scale(1); } 50% { transform: scale(1.02); } 100% { transform: scale(1); } }
+    input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    button { font-family: 'Quicksand', sans-serif; }
+    input { font-family: 'Quicksand', sans-serif; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    const STORAGE_KEY = "accountability-partner-v4";
+    const WATER_TARGET = 8;
+    const OMAD_LIMIT = 1;
+    const WORKOUT_TYPES = ["yoga", "hiking", "running", "weights"];
+    const WORKOUT_ICONS = { yoga: "🧘", hiking: "🥾", running: "🏃", weights: "🏋️" };
+    const WORKOUT_LABELS = { yoga: "Yoga", hiking: "Hiking", running: "Running", weights: "Weights" };
+    const F = "'Quicksand', sans-serif";
+
+    function loadState() { try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch {} return null; }
+    function saveState(s) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {} }
+    function clearState() { try { localStorage.removeItem(STORAGE_KEY); } catch {} }
+
+    const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const todayStr = () => localDateStr(new Date());
+
+    const defaultDay = (date) => ({ date, water: 0, mealTimes: [], workouts: [], weight: null, fastHoursAtMeal: null });
+
+    const migrateDay = (day) => {
+      if (!day) return day;
+      if (day.meals !== undefined && !day.mealTimes) day = { ...day, mealTimes: Array(day.meals).fill(null) };
+      if (day.workout !== undefined && !day.workouts) day = { ...day, workouts: day.workout ? ["weights"] : [] };
+      if (!day.workouts) day = { ...day, workouts: [] };
+      if (day.fastHoursAtMeal === undefined) day = { ...day, fastHoursAtMeal: null };
+      return day;
+    };
+
+    const defaultState = () => ({ days: {}, startWeight: null, longestStreak: 0, startDate: todayStr() });
+
+    function mealCount(day) { return day?.mealTimes?.length ?? 0; }
+    function hasWorkout(day) { return day?.workouts?.length > 0; }
+
+    function isDayComplete(day) {
+      if (!day) return false;
+      return day.water >= WATER_TARGET && mealCount(day) <= OMAD_LIMIT && hasWorkout(day);
+    }
+
+    function getStreak(days) {
+      let streak = 0; const today = new Date();
+      for (let i = 0; i < 365; i++) {
+        const d = new Date(today); d.setDate(d.getDate()-i);
+        const key = localDateStr(d), day = days[key] ? migrateDay(days[key]) : null;
+        if (day && isDayComplete(day)) streak++;
+        else if (i === 0) continue;
+        else break;
+      }
+      return streak;
+    }
+
+    function getLastMealTimestamp(days) {
+      let latest = null;
+      for (const key of Object.keys(days)) {
+        const day = migrateDay(days[key]);
+        if (day.mealTimes) { for (const t of day.mealTimes) { if (t && (!latest || t > latest)) latest = t; } }
+      }
+      return latest;
+    }
+
+    function getFastingHistory(days, limit=14) {
+      const entries = []; const today = new Date();
+      for (let i = limit-1; i >= 0; i--) {
+        const d = new Date(today); d.setDate(d.getDate()-i);
+        const key = localDateStr(d), day = days[key] ? migrateDay(days[key]) : null;
+        if (day && day.fastHoursAtMeal != null) {
+          entries.push({ date: key, hours: day.fastHoursAtMeal, label: d.toLocaleDateString("en-US",{month:"short",day:"numeric"}) });
+        }
+      }
+      return entries;
+    }
+
+    function formatElapsed(ms) {
+      if (!ms || ms < 0) return null;
+      const totalMin = Math.floor(ms / 60000), hours = Math.floor(totalMin/60), mins = totalMin%60;
+      if (hours >= 24) return `${Math.floor(hours/24)}d ${hours%24}h`;
+      if (hours > 0) return `${hours}h ${mins}m`;
+      return `${mins}m`;
+    }
+
+    function formatTime(ts) {
+      if (!ts) return "—";
+      return new Date(ts).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+    }
+
+    function getWeekDays() {
+      const days = [], today = new Date(), dow = today.getDay();
+      const mon = new Date(today); mon.setDate(today.getDate() - ((dow+6)%7));
+      for (let i = 0; i < 7; i++) { const d = new Date(mon); d.setDate(mon.getDate()+i); days.push({ key: localDateStr(d), day: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i], date: d.getDate() }); }
+      return days;
+    }
+
+    function getWeightHistory(days, limit=14) {
+      const entries = [], today = new Date();
+      for (let i = limit-1; i >= 0; i--) {
+        const d = new Date(today); d.setDate(d.getDate()-i);
+        const key = localDateStr(d), day = days[key];
+        if (day && day.weight != null) entries.push({ date: key, weight: day.weight, label: d.toLocaleDateString("en-US",{month:"short",day:"numeric"}) });
+      }
+      return entries;
+    }
+
+    function getCreatureStage(streak) {
+      if (streak >= 30) return "dragon"; if (streak >= 14) return "wyvern";
+      if (streak >= 7) return "drake"; if (streak >= 3) return "hatchling"; return "egg";
+    }
+
+    function getMotivation(streak, td) {
+      const complete = isDayComplete(td), mc = mealCount(td);
+      if (complete && streak >= 7) return "You're on FIRE. Literally. 🔥";
+      if (complete) return "Today: crushed. Keep this energy.";
+      const issues = [];
+      if (td.water < WATER_TARGET) issues.push(`${WATER_TARGET-td.water} more glasses`);
+      if (mc > OMAD_LIMIT) issues.push("over OMAD limit");
+      if (!hasWorkout(td)) issues.push("a workout");
+      if (issues.length === 0) return "All targets hit! 💪";
+      if (mc > OMAD_LIMIT) return "Over your meal limit. Tomorrow's a new day.";
+      if (issues.length === 1) return `Almost there — just ${issues[0]} to go!`;
+      if (new Date().getHours() < 10) return "Fresh day ahead. You got this.";
+      return `Still need: ${issues.join(" & ")}`;
+    }
+
+    // --- Sparkline component ---
+    const Sparkline = ({ data, valueKey, color, unit, label }) => {
+      if (data.length < 2) return null;
+      const vals = data.map(d => d[valueKey]);
+      const minV = Math.min(...vals), maxV = Math.max(...vals), range = maxV - minV || 1;
+      return (
+        <div style={{ marginTop: "12px" }}>
+          {label && <div style={{ fontFamily: F, fontSize: "9px", color: color, opacity: 0.6, marginBottom: "4px", fontWeight: 600, letterSpacing: "0.5px" }}>{label}</div>}
+          <svg viewBox={`0 0 ${Math.max(data.length*24,48)} 40`} style={{ width: "100%", height: "40px" }}>
+            <defs><linearGradient id={`grad-${valueKey}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.2"/><stop offset="100%" stopColor={color} stopOpacity="0"/></linearGradient></defs>
+            <path d={data.map((e,i)=>{const x=i*24+12,y=36-((e[valueKey]-minV)/range)*30;return `${i===0?"M":"L"} ${x} ${y}`;}).join(" ")+` L ${(data.length-1)*24+12} 40 L 12 40 Z`} fill={`url(#grad-${valueKey})`}/>
+            <polyline points={data.map((e,i)=>`${i*24+12},${36-((e[valueKey]-minV)/range)*30}`).join(" ")} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            {data.map((e,i)=><circle key={i} cx={i*24+12} cy={36-((e[valueKey]-minV)/range)*30} r="3" fill={i===data.length-1?color:`${color}66`}/>)}
+          </svg>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: "2px" }}>
+            <span style={{ fontFamily: F, fontSize: "8px", color: `${color}99` }}>{data[0].label}</span>
+            <span style={{ fontFamily: F, fontSize: "8px", color: `${color}99` }}>{data[data.length-1].label}</span>
+          </div>
+        </div>
+      );
+    };
+
+    // --- Creature SVGs ---
+    const EggSVG = () => (
+      <svg viewBox="0 0 100 120" width="80" height="96">
+        <defs>
+          <radialGradient id="eggG" cx="45%" cy="40%"><stop offset="0%" stopColor="#5ebd7e"/><stop offset="100%" stopColor="#2d6e4a"/></radialGradient>
+        </defs>
+        <ellipse cx="50" cy="65" rx="30" ry="40" fill="url(#eggG)" stroke="#256b42" strokeWidth="1.5"/>
+        {/* scale pattern */}
+        <path d="M 35 50 Q 42 45 50 50 Q 58 45 65 50" stroke="#3a9e5e" strokeWidth="1" fill="none" opacity="0.5"/>
+        <path d="M 30 65 Q 40 58 50 65 Q 60 58 70 65" stroke="#3a9e5e" strokeWidth="1" fill="none" opacity="0.4"/>
+        <path d="M 33 80 Q 42 73 50 80 Q 58 73 67 80" stroke="#3a9e5e" strokeWidth="1" fill="none" opacity="0.3"/>
+        {/* gleam */}
+        <ellipse cx="40" cy="52" rx="4" ry="8" fill="white" opacity="0.15" transform="rotate(-15 40 52)"/>
+      </svg>
+    );
+
+    const HatchlingSVG = () => (
+      <svg viewBox="0 0 120 100" width="100" height="83">
+        <defs>
+          <linearGradient id="hatchG" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="#6bcf8a"/><stop offset="100%" stopColor="#45a864"/></linearGradient>
+        </defs>
+        {/* body - small serpent coil */}
+        <path d="M 38 52 Q 55 38 70 48 Q 85 58 92 48 Q 98 40 95 50 Q 90 62 80 58 Q 72 55 75 62" stroke="url(#hatchG)" strokeWidth="8" fill="none" strokeLinecap="round"/>
+        {/* belly highlight */}
+        <path d="M 42 54 Q 56 42 68 50 Q 78 56 88 50" stroke="#a8e6be" strokeWidth="2.5" fill="none" strokeLinecap="round" opacity="0.5"/>
+        {/* head - small elongated dragon shape */}
+        <path d="M 24 50 L 32 44 L 42 47 L 40 56 L 32 58 L 24 55 Z" fill="#5ebd7e"/>
+        {/* tiny horn buds */}
+        <path d="M 30 44 L 28 38 L 34 43" fill="#fbbf24" opacity="0.6"/>
+        <path d="M 36 44 L 36 39 L 39 44" fill="#fbbf24" opacity="0.5"/>
+        {/* eyes - big but with slight dragon shape */}
+        <ellipse cx="30" cy="49" rx="3.5" ry="3" fill="#1a3a28"/>
+        <circle cx="29" cy="47.5" r="1.5" fill="white"/>
+        {/* tiny nostril dots */}
+        <circle cx="25" cy="51" r="0.8" fill="#2a5e3a"/>
+        {/* smile */}
+        <path d="M 26 54 Q 30 57 34 54" stroke="#2a5e3a" strokeWidth="1" fill="none" strokeLinecap="round"/>
+        {/* one tiny dorsal fin bud */}
+        <path d="M 58 42 L 56 36 L 62 40" fill="#fbbf24" opacity="0.4"/>
+        {/* tail tip */}
+        <path d="M 73 62 Q 78 68 74 70" stroke="#45a864" strokeWidth="3" fill="none" strokeLinecap="round"/>
+      </svg>
+    );
+
+    const DrakeSVG = () => (
+      <svg viewBox="0 0 140 100" width="120" height="86">
+        <defs>
+          <linearGradient id="drakeG" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="#3ea862"/><stop offset="100%" stopColor="#2d8a4e"/></linearGradient>
+        </defs>
+        {/* body - longer serpent */}
+        <path d="M 25 50 Q 40 30 55 42 Q 70 54 85 40 Q 100 28 110 38 Q 120 48 125 42" stroke="url(#drakeG)" strokeWidth="10" fill="none" strokeLinecap="round"/>
+        {/* belly */}
+        <path d="M 30 53 Q 43 36 55 45 Q 68 54 82 43 Q 95 32 108 40" stroke="#a8e6be" strokeWidth="3" fill="none" strokeLinecap="round" opacity="0.5"/>
+        {/* small dorsal fins */}
+        <path d="M 50 37 L 47 28 L 55 35" fill="#fbbf24" opacity="0.7"/>
+        <path d="M 70 47 L 68 38 L 75 44" fill="#fbbf24" opacity="0.6"/>
+        <path d="M 90 34 L 88 25 L 95 31" fill="#fbbf24" opacity="0.5"/>
+        {/* head */}
+        <ellipse cx="23" cy="50" rx="11" ry="9" fill="#3ea862"/>
+        {/* yellow jaw marking */}
+        <path d="M 16 54 Q 23 60 30 54" fill="#fbbf24" opacity="0.4"/>
+        {/* eyes */}
+        <ellipse cx="19" cy="48" rx="3" ry="3.5" fill="#1a3a28"/>
+        <ellipse cx="27" cy="48" rx="3" ry="3.5" fill="#1a3a28"/>
+        <circle cx="18" cy="46.5" r="1.5" fill="white"/>
+        <circle cx="26" cy="46.5" r="1.5" fill="white"/>
+        {/* red eye slit hint */}
+        <ellipse cx="19" cy="48" rx="1" ry="2.5" fill="#4a1a1a" opacity="0.3"/>
+        <ellipse cx="27" cy="48" rx="1" ry="2.5" fill="#4a1a1a" opacity="0.3"/>
+        {/* tail fin */}
+        <path d="M 123 40 Q 132 32 135 40 Q 132 48 123 44" fill="#fbbf24" opacity="0.6"/>
+      </svg>
+    );
+
+    const WyvernSVG = () => (
+      <svg viewBox="0 0 160 110" width="140" height="96">
+        <defs>
+          <linearGradient id="wyvG" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="#2a8c50"/><stop offset="100%" stopColor="#1a6b3a"/></linearGradient>
+          <filter id="wyvGlow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        {/* body - full serpent with curves */}
+        <path d="M 20 50 Q 35 25 50 38 Q 65 52 80 35 Q 95 18 110 32 Q 125 46 135 35 Q 142 28 148 32" stroke="url(#wyvG)" strokeWidth="9" fill="none" strokeLinecap="round"/>
+        {/* belly stripe */}
+        <path d="M 25 53 Q 38 31 50 41 Q 63 52 78 38 Q 93 22 108 34 Q 120 44 132 37" stroke="#a8e6be" strokeWidth="2.5" fill="none" strokeLinecap="round" opacity="0.4"/>
+        {/* yellow markings along body */}
+        <circle cx="50" cy="36" r="2" fill="#fbbf24" opacity="0.7"/>
+        <circle cx="80" cy="32" r="2" fill="#fbbf24" opacity="0.7"/>
+        <circle cx="110" cy="30" r="2" fill="#fbbf24" opacity="0.7"/>
+        {/* dorsal fins - bigger, flowing */}
+        <path d="M 42 32 L 37 18 L 48 28 L 44 14 L 54 28" fill="#fbbf24" opacity="0.8"/>
+        <path d="M 72 28 L 68 15 L 78 24 L 75 12 L 84 24" fill="#fbbf24" opacity="0.7"/>
+        <path d="M 102 26 L 99 14 L 108 22 L 105 10 L 114 22" fill="#fbbf24" opacity="0.6"/>
+        {/* head - more angular */}
+        <path d="M 8 48 L 18 40 L 30 44 L 28 54 L 18 58 Z" fill="#2a8c50"/>
+        {/* horn */}
+        <path d="M 16 40 L 12 30 L 20 38" fill="#fbbf24" opacity="0.8"/>
+        {/* eyes - fierce */}
+        <ellipse cx="20" cy="47" rx="3.5" ry="3" fill="#fbbf24"/>
+        <ellipse cx="20" cy="47" rx="1.2" ry="2.8" fill="#1a1a1a"/>
+        {/* jaw line */}
+        <path d="M 10 52 L 18 56 L 28 52" stroke="#1a5e35" strokeWidth="1" fill="none"/>
+        {/* tail fin - elaborate */}
+        <path d="M 145 30 Q 155 20 158 30 Q 160 38 155 42 Q 150 38 148 34" fill="#fbbf24" opacity="0.7"/>
+        <path d="M 146 32 Q 153 25 155 32" stroke="#e0a500" strokeWidth="0.8" fill="none"/>
+        {/* energy wisps */}
+        <path d="M 30 42 Q 25 35 30 30" stroke="#fbbf24" strokeWidth="1" fill="none" opacity="0.3" filter="url(#wyvGlow)"/>
+        <path d="M 135 33 Q 140 26 138 20" stroke="#fbbf24" strokeWidth="1" fill="none" opacity="0.3" filter="url(#wyvGlow)"/>
+      </svg>
+    );
+
+    const DragonSVG = () => (
+      <svg viewBox="0 0 180 120" width="160" height="107">
+        <defs>
+          <linearGradient id="dragG" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="#1f7a42"/><stop offset="100%" stopColor="#145e30"/></linearGradient>
+          <linearGradient id="dragGold" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#fde68a"/><stop offset="100%" stopColor="#f59e0b"/></linearGradient>
+          <filter id="dragGlow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="dragGlow2"><feGaussianBlur stdDeviation="1.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        {/* energy streaks background */}
+        <path d="M 20 90 Q 50 70 80 85 Q 110 100 140 80 Q 160 68 175 75" stroke="#fbbf24" strokeWidth="1.5" fill="none" opacity="0.15" filter="url(#dragGlow)"/>
+        <path d="M 10 100 Q 40 85 70 95 Q 100 105 130 90 Q 155 78 170 85" stroke="#fbbf24" strokeWidth="1" fill="none" opacity="0.1" filter="url(#dragGlow)"/>
+        {/* body - majestic serpent */}
+        <path d="M 18 55 Q 35 25 52 40 Q 68 55 85 32 Q 100 12 118 28 Q 132 42 145 30 Q 155 22 162 28 Q 168 34 172 30" stroke="url(#dragG)" strokeWidth="10" fill="none" strokeLinecap="round"/>
+        {/* belly stripe - golden */}
+        <path d="M 24 58 Q 38 32 52 43 Q 66 55 83 36 Q 98 16 116 30 Q 128 40 142 32" stroke="url(#dragGold)" strokeWidth="3" fill="none" strokeLinecap="round" opacity="0.5"/>
+        {/* golden markings along body */}
+        <circle cx="52" cy="38" r="2.5" fill="#fbbf24" opacity="0.8" filter="url(#dragGlow2)"/>
+        <circle cx="85" cy="29" r="2.5" fill="#fbbf24" opacity="0.8" filter="url(#dragGlow2)"/>
+        <circle cx="118" cy="26" r="2.5" fill="#fbbf24" opacity="0.8" filter="url(#dragGlow2)"/>
+        <circle cx="145" cy="28" r="2" fill="#fbbf24" opacity="0.6" filter="url(#dragGlow2)"/>
+        {/* dorsal fins - grand flowing crests */}
+        <path d="M 42 33 L 35 12 L 46 25 L 40 6 L 52 22 L 48 10 L 58 28" fill="url(#dragGold)" opacity="0.85"/>
+        <path d="M 75 24 L 70 5 L 80 18 L 76 0 L 88 16 L 84 6 L 92 22" fill="url(#dragGold)" opacity="0.75"/>
+        <path d="M 110 22 L 106 6 L 115 16 L 112 2 L 122 14" fill="url(#dragGold)" opacity="0.65"/>
+        <path d="M 138 26 L 135 14 L 142 22 L 140 12 L 148 22" fill="url(#dragGold)" opacity="0.55"/>
+        {/* head - angular, powerful */}
+        <path d="M 4 52 L 15 42 L 28 44 L 30 56 L 18 62 L 6 58 Z" fill="#1f7a42"/>
+        {/* head golden plate */}
+        <path d="M 12 44 L 18 42 L 24 44 L 22 48 L 14 48 Z" fill="#fbbf24" opacity="0.5"/>
+        {/* horns - two */}
+        <path d="M 14 42 L 8 28 L 18 38" fill="url(#dragGold)" opacity="0.9"/>
+        <path d="M 22 42 L 20 30 L 26 40" fill="url(#dragGold)" opacity="0.7"/>
+        {/* eyes - intense golden */}
+        <ellipse cx="18" cy="49" rx="4" ry="3.5" fill="#fde68a" filter="url(#dragGlow2)"/>
+        <ellipse cx="18" cy="49" rx="1.2" ry="3.2" fill="#1a1a1a"/>
+        {/* jaw */}
+        <path d="M 6 56 L 16 60 L 28 54" stroke="#145e30" strokeWidth="1.2" fill="none"/>
+        <path d="M 8 56 L 10 58" stroke="#fbbf24" strokeWidth="0.8" opacity="0.5"/>
+        {/* tail - flowing with golden fin */}
+        <path d="M 168 28 Q 175 18 178 28 Q 180 36 176 42 Q 172 38 170 32" fill="url(#dragGold)" opacity="0.8"/>
+        <path d="M 170 26 Q 178 18 180 25" stroke="#fde68a" strokeWidth="1" fill="none" opacity="0.6" filter="url(#dragGlow2)"/>
+        {/* energy aura streaks */}
+        <path d="M 28 44 Q 20 35 25 24" stroke="#fbbf24" strokeWidth="1.5" fill="none" opacity="0.4" filter="url(#dragGlow)"/>
+        <path d="M 55 30 Q 52 20 56 12" stroke="#fbbf24" strokeWidth="1" fill="none" opacity="0.3" filter="url(#dragGlow)"/>
+        <path d="M 150 28 Q 155 18 152 10" stroke="#fbbf24" strokeWidth="1" fill="none" opacity="0.35" filter="url(#dragGlow)"/>
+        <path d="M 90 22 Q 88 12 92 5" stroke="#fbbf24" strokeWidth="1" fill="none" opacity="0.25" filter="url(#dragGlow)"/>
+      </svg>
+    );
+
+    const CreatureSVGs = { egg: EggSVG, hatchling: HatchlingSVG, drake: DrakeSVG, wyvern: WyvernSVG, dragon: DragonSVG };
+
+    // --- Creature ---
+    const CreatureDisplay = ({ stage, streak, pulse }) => {
+      const configs = {
+        egg:{bg:"linear-gradient(135deg,#b8860b,#d4a017)",glow:"0 0 16px rgba(212,160,23,0.15)",label:"Egg",sublabel:"Build a 3-day streak to hatch"},
+        hatchling:{bg:"linear-gradient(135deg,#1a4a2e,#2d6e42)",glow:"0 0 20px rgba(94,189,126,0.2)",label:"Hatchling",sublabel:"A tiny wyrm emerges!"},
+        drake:{bg:"linear-gradient(135deg,#14503a,#1a6b48)",glow:"0 0 24px rgba(62,168,98,0.25)",label:"Drake",sublabel:"7 days — growing stronger"},
+        wyvern:{bg:"linear-gradient(135deg,#0f3a28,#1a5e3e)",glow:"0 0 30px rgba(42,140,80,0.3)",label:"Wyvern",sublabel:"Two weeks of discipline"},
+        dragon:{bg:"linear-gradient(135deg,#0a2e1e,#14502e)",glow:"0 0 40px rgba(251,191,36,0.25)",label:"Dragon",sublabel:"Unstoppable. Legendary."},
+      };
+      const c = configs[stage];
+      const SVG = CreatureSVGs[stage];
+      return (
+        <div style={{background:c.bg,borderRadius:"20px",padding:"24px 16px",textAlign:"center",position:"relative",overflow:"hidden",boxShadow:c.glow,transition:"all 0.6s ease"}}>
+          {(stage==="wyvern"||stage==="dragon") && <div style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none"}}>
+            {[...Array(stage==="dragon"?8:5)].map((_,i)=><div key={i} style={{position:"absolute",left:`${10+i*12}%`,bottom:"-10px",width:stage==="dragon"?"5px":"4px",height:stage==="dragon"?"5px":"4px",borderRadius:"50%",background:"#fbbf24",opacity:stage==="dragon"?0.5:0.3,animation:`particleRise ${2+i*0.4}s ease-in-out infinite ${i*0.3}s`}}/>)}
+          </div>}
+          <div style={{display:"flex",justifyContent:"center",marginBottom:"8px",animation:pulse?"creaturePulse 0.4s ease":(stage!=="egg"?"creatureFloat 3s ease-in-out infinite":"none"),filter:stage==="dragon"?"drop-shadow(0 0 16px rgba(251,191,36,0.4))":stage==="wyvern"?"drop-shadow(0 0 8px rgba(251,191,36,0.2))":"none"}}>
+            <SVG />
+          </div>
+          <div style={{color:"rgba(255,255,255,0.95)",fontFamily:F,fontSize:"14px",fontWeight:700,letterSpacing:"2px",textTransform:"uppercase"}}>{c.label}</div>
+          <div style={{color:"rgba(255,255,255,0.5)",fontFamily:F,fontSize:"11px",marginTop:"4px",fontWeight:500}}>{c.sublabel}</div>
+          {streak>0 && <div style={{position:"absolute",top:"12px",right:"12px",background:"rgba(255,255,255,0.15)",backdropFilter:"blur(8px)",borderRadius:"10px",padding:"4px 10px",display:"flex",alignItems:"center",gap:"4px"}}>
+            <span style={{fontSize:"12px"}}>🔥</span>
+            <span style={{color:"white",fontFamily:F,fontSize:"13px",fontWeight:700}}>{streak}</span>
+          </div>}
+        </div>
+      );
+    };
+
+    // --- Water ---
+    const WaterTracker = ({ count, onAdd, onRemove }) => (
+      <div style={{background:"#f0f9ff",borderRadius:"16px",padding:"14px 16px",border:"1px solid #bae6fd"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+            <span style={{fontSize:"18px"}}>💧</span>
+            <span style={{fontFamily:F,fontSize:"13px",fontWeight:700,color:"#0c4a6e"}}>Water</span>
+          </div>
+          <span style={{fontFamily:F,fontSize:"12px",fontWeight:600,color:count>=WATER_TARGET?"#059669":"#64748b"}}>{count}/{WATER_TARGET} {count>=WATER_TARGET?"✓":""}</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+          <button onClick={onRemove} disabled={count<=0} style={{width:"34px",height:"34px",borderRadius:"10px",border:"none",background:count>0?"#e0f2fe":"#f1f5f9",color:count>0?"#0284c7":"#cbd5e1",fontSize:"18px",cursor:count>0?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>−</button>
+          <div style={{flex:1,display:"flex",gap:"3px",justifyContent:"center"}}>
+            {[...Array(WATER_TARGET)].map((_,i)=><div key={i} style={{width:"100%",maxWidth:"28px",height:"22px",borderRadius:"6px",background:i<count?"linear-gradient(180deg,#38bdf8,#0284c7)":"#e2e8f0",transition:"all 0.2s ease",transform:i<count?"scaleY(1)":"scaleY(0.85)"}}/>)}
+          </div>
+          <button onClick={onAdd} disabled={count>=WATER_TARGET} style={{width:"34px",height:"34px",borderRadius:"10px",border:"none",background:count<WATER_TARGET?"#0284c7":"#cbd5e1",color:"white",fontSize:"18px",cursor:count<WATER_TARGET?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>+</button>
+        </div>
+      </div>
+    );
+
+    // --- OMAD ---
+    const OMADTracker = ({ mealTimes, onLogMeal, onRemoveMeal, onEditMeal, lastMealTimestamp, now, fastingHistory }) => {
+      const count = mealTimes.length, overLimit = count > OMAD_LIMIT;
+      const elapsed = lastMealTimestamp ? now - lastMealTimestamp : null;
+      const elapsedStr = formatElapsed(elapsed);
+      const [editingIdx, setEditingIdx] = useState(null);
+      const [editTime, setEditTime] = useState("");
+
+      const startEdit = (i, ts) => {
+        setEditingIdx(i);
+        if (ts) {
+          const d = new Date(ts);
+          setEditTime(`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`);
+        } else {
+          setEditTime("");
+        }
+      };
+
+      const saveEdit = (i) => {
+        if (!editTime) return;
+        const [h, m] = editTime.split(":").map(Number);
+        const d = new Date();
+        d.setHours(h, m, 0, 0);
+        onEditMeal(i, d.getTime());
+        setEditingIdx(null);
+        setEditTime("");
+      };
+
+      const cancelEdit = () => { setEditingIdx(null); setEditTime(""); };
+
+      return (
+        <div style={{background:overLimit?"#fef2f2":"#fefce8",borderRadius:"16px",padding:"14px 16px",border:overLimit?"1px solid #fca5a5":"1px solid #fde68a",transition:"all 0.3s ease"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+              <span style={{fontSize:"18px"}}>🍽️</span>
+              <span style={{fontFamily:F,fontSize:"13px",fontWeight:700,color:overLimit?"#991b1b":"#713f12"}}>OMAD</span>
+            </div>
+            <span style={{fontFamily:F,fontSize:"12px",fontWeight:600,color:overLimit?"#dc2626":"#059669"}}>
+              {count===0?"Fasting ✓":count===1?"1 meal ✓":`${count} meals ✗`}
+            </span>
+          </div>
+          <div style={{background:overLimit?"#fee2e2":"linear-gradient(135deg,rgba(251,191,36,0.08),rgba(245,158,11,0.04))",borderRadius:"12px",padding:"10px 14px",marginBottom:"10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontFamily:F,fontSize:"9px",color:"#a16207",letterSpacing:"0.5px",marginBottom:"2px",textTransform:"uppercase",fontWeight:600}}>{lastMealTimestamp?"Time since last meal":"No meals logged yet"}</div>
+              <div style={{fontFamily:F,fontSize:"22px",fontWeight:700,color:overLimit?"#991b1b":"#713f12"}}>{elapsedStr||"—"}</div>
+            </div>
+            {lastMealTimestamp && <div style={{textAlign:"right"}}>
+              <div style={{fontFamily:F,fontSize:"9px",color:"#a16207",letterSpacing:"0.5px",marginBottom:"2px",fontWeight:600}}>LAST ATE</div>
+              <div style={{fontFamily:F,fontSize:"12px",color:"#92400e",fontWeight:700}}>{formatTime(lastMealTimestamp)}</div>
+            </div>}
+          </div>
+          {count>0 && <div style={{marginBottom:"10px",display:"flex",flexDirection:"column",gap:"4px"}}>
+            {mealTimes.map((t,i)=><div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 10px",borderRadius:"8px",background:i===0?"#fef9c3":"#fee2e2"}}>
+              <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+                <span style={{fontSize:"14px"}}>{i===0?"🍳":"⚠️"}</span>
+                <span style={{fontFamily:F,fontSize:"11px",fontWeight:600,color:i===0?"#92400e":"#991b1b"}}>Meal {i+1}</span>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                {editingIdx===i ? (
+                  <>
+                    <input type="time" value={editTime} onChange={e=>setEditTime(e.target.value)} style={{padding:"4px 6px",border:"2px solid #fbbf24",borderRadius:"6px",fontFamily:F,fontSize:"11px",fontWeight:600,outline:"none",background:"white",color:"#713f12",width:"90px"}} />
+                    <button onClick={()=>saveEdit(i)} style={{width:"22px",height:"22px",borderRadius:"6px",border:"none",background:"#fbbf24",color:"white",fontSize:"11px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>✓</button>
+                    <button onClick={cancelEdit} style={{width:"22px",height:"22px",borderRadius:"6px",border:"none",background:"rgba(0,0,0,0.06)",color:"#999",fontSize:"11px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                  </>
+                ) : (
+                  <>
+                    <span style={{fontFamily:F,fontSize:"11px",fontWeight:500,color:"#a16207"}}>{t?formatTime(t):"—"}</span>
+                    <button onClick={()=>startEdit(i,t)} style={{width:"22px",height:"22px",borderRadius:"6px",border:"none",background:"rgba(0,0,0,0.06)",color:"#a16207",fontSize:"10px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,padding:0}}>✎</button>
+                    <button onClick={()=>onRemoveMeal(i)} style={{width:"22px",height:"22px",borderRadius:"6px",border:"none",background:"rgba(0,0,0,0.06)",color:"#999",fontSize:"13px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,padding:0}}>×</button>
+                  </>
+                )}
+              </div>
+            </div>)}
+          </div>}
+          <button onClick={onLogMeal} style={{width:"100%",padding:"10px",borderRadius:"10px",border:"none",background:count>=OMAD_LIMIT?"linear-gradient(135deg,#fecaca,#fee2e2)":"linear-gradient(135deg,#fbbf24,#f59e0b)",color:count>=OMAD_LIMIT?"#991b1b":"white",fontFamily:F,fontSize:"12px",fontWeight:700,cursor:"pointer",letterSpacing:"0.5px"}}>
+            {count===0?"Log Meal":count>=OMAD_LIMIT?"⚠️ Log Another Meal":"Log Meal"}
+          </button>
+          {overLimit && <div style={{marginTop:"8px",padding:"6px 10px",borderRadius:"8px",background:"#fee2e2",textAlign:"center",fontFamily:F,fontSize:"10px",fontWeight:600,color:"#991b1b"}}>Over limit — streak won't count today</div>}
+          <Sparkline data={fastingHistory} valueKey="hours" color="#b45309" label="Fasting hours (at meal)" />
+        </div>
+      );
+    };
+
+    // --- Workout ---
+    const WorkoutTracker = ({ workouts, onToggle }) => {
+      const done = workouts.length > 0;
+      return (
+        <div style={{borderRadius:"16px",padding:"14px 16px",border:done?"1px solid #86efac":"1px solid #e2e8f0",background:done?"linear-gradient(135deg,#ecfdf5,#d1fae5)":"#f8fafc",transition:"all 0.25s ease",boxShadow:done?"0 2px 12px rgba(16,185,129,0.12)":"none"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+              <span style={{fontSize:"18px"}}>💪</span>
+              <span style={{fontFamily:F,fontSize:"13px",fontWeight:700,color:done?"#065f46":"#334155"}}>Workout</span>
+            </div>
+            <span style={{fontFamily:F,fontSize:"12px",fontWeight:600,color:done?"#059669":"#94a3b8"}}>{done?`${workouts.length} done ✓`:"Tap to log"}</span>
+          </div>
+          <div style={{display:"flex",gap:"8px"}}>
+            {WORKOUT_TYPES.map(type => {
+              const active = workouts.includes(type);
+              return (
+                <button key={type} onClick={()=>onToggle(type)} style={{
+                  flex:1, padding:"10px 4px", borderRadius:"12px", border:"none",
+                  background: active ? "linear-gradient(135deg,#10b981,#059669)" : "#e2e8f0",
+                  cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:"4px",
+                  transition:"all 0.2s ease",
+                  boxShadow: active ? "0 2px 8px rgba(16,185,129,0.25)" : "none",
+                  transform: active ? "scale(1.02)" : "scale(1)",
+                }}>
+                  <span style={{fontSize:"20px"}}>{WORKOUT_ICONS[type]}</span>
+                  <span style={{fontFamily:F,fontSize:"9px",fontWeight:700,color:active?"white":"#64748b",letterSpacing:"0.3px"}}>{WORKOUT_LABELS[type]}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      );
+    };
+
+    // --- Weight ---
+    const WeightTracker = ({ todayWeight, onLog, weightHistory, startWeight }) => {
+      const [input, setInput] = useState(todayWeight!=null?String(todayWeight):"");
+      const [editing, setEditing] = useState(todayWeight==null);
+      useEffect(()=>{ if(todayWeight!=null){setInput(String(todayWeight));setEditing(false);} },[todayWeight]);
+
+      const latest = weightHistory.length>0?weightHistory[weightHistory.length-1].weight:null;
+      const earliest = weightHistory.length>0?weightHistory[0].weight:null;
+      const trend = weightHistory.length>=2?latest-earliest:null;
+      const allTimeChange = latest&&startWeight?latest-startWeight:null;
+
+      const handleSave = ()=>{ const val=parseFloat(input); if(!isNaN(val)&&val>50&&val<500){onLog(val);setEditing(false);} };
+
+      return (
+        <div style={{background:"#faf5ff",borderRadius:"16px",padding:"14px 16px",border:"1px solid #e9d5ff"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+              <span style={{fontSize:"18px"}}>⚖️</span>
+              <span style={{fontFamily:F,fontSize:"13px",fontWeight:700,color:"#581c87"}}>Weight</span>
+            </div>
+            {allTimeChange!=null && <span style={{fontFamily:F,fontSize:"11px",fontWeight:700,color:allTimeChange<=0?"#059669":"#dc2626",background:allTimeChange<=0?"#ecfdf5":"#fef2f2",padding:"2px 8px",borderRadius:"6px"}}>{allTimeChange<=0?"↓":"↑"} {Math.abs(allTimeChange).toFixed(1)} lbs total</span>}
+          </div>
+          {editing||todayWeight==null ? (
+            <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+              <input type="number" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleSave()} placeholder="Today's weight" step="0.1" style={{flex:1,padding:"10px 12px",border:"2px solid #d8b4fe",borderRadius:"10px",fontFamily:F,fontSize:"14px",outline:"none",background:"#fefbff",color:"#581c87",fontWeight:600}} />
+              <span style={{fontFamily:F,fontSize:"12px",color:"#9333ea",fontWeight:600}}>lbs</span>
+              <button onClick={handleSave} style={{padding:"10px 14px",border:"none",borderRadius:"10px",background:input?"linear-gradient(135deg,#9333ea,#7c3aed)":"#d8cdd4",color:"white",fontFamily:F,fontSize:"12px",cursor:input?"pointer":"not-allowed",fontWeight:700}}>Log</button>
+            </div>
+          ) : (
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:"6px"}}>
+                <span style={{fontFamily:F,fontSize:"26px",fontWeight:700,color:"#581c87"}}>{todayWeight}</span>
+                <span style={{fontFamily:F,fontSize:"12px",color:"#9333ea",fontWeight:600}}>lbs</span>
+                {trend!=null && <span style={{fontFamily:F,fontSize:"11px",fontWeight:600,color:trend<=0?"#059669":"#dc2626",marginLeft:"4px"}}>{trend<=0?"↓":"↑"}{Math.abs(trend).toFixed(1)} this period</span>}
+              </div>
+              <button onClick={()=>setEditing(true)} style={{background:"#ede9fe",border:"none",borderRadius:"8px",padding:"6px 10px",fontFamily:F,fontSize:"10px",fontWeight:700,color:"#7c3aed",cursor:"pointer"}}>Edit</button>
+            </div>
+          )}
+          <Sparkline data={weightHistory} valueKey="weight" color="#9333ea" />
+        </div>
+      );
+    };
+
+    // --- Countdown Timer ---
+    const CountdownTimer = () => {
+      const [hours, setHours] = useState("");
+      const [minutes, setMinutes] = useState("");
+      const [totalSeconds, setTotalSeconds] = useState(null);
+      const [remaining, setRemaining] = useState(null);
+      const [running, setRunning] = useState(false);
+      const intervalRef = useRef(null);
+      const endTimeRef = useRef(null);
+
+      useEffect(() => {
+        if (running && endTimeRef.current) {
+          intervalRef.current = setInterval(() => {
+            const left = Math.max(0, Math.round((endTimeRef.current - Date.now()) / 1000));
+            setRemaining(left);
+            if (left <= 0) {
+              clearInterval(intervalRef.current);
+              setRunning(false);
+              try { 
+                if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                  new Notification("Timer done! ⏰");
+                }
+              } catch {}
+            }
+          }, 250);
+        }
+        return () => clearInterval(intervalRef.current);
+      }, [running]);
+
+      const handleStart = () => {
+        const h = parseInt(hours) || 0, m = parseInt(minutes) || 0;
+        const total = h * 3600 + m * 60;
+        if (total <= 0) return;
+        setTotalSeconds(total);
+        setRemaining(total);
+        endTimeRef.current = Date.now() + total * 1000;
+        setRunning(true);
+        if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+          Notification.requestPermission();
+        }
+      };
+
+      const handleStop = () => { clearInterval(intervalRef.current); setRunning(false); };
+      const handleReset = () => { clearInterval(intervalRef.current); setRunning(false); setRemaining(null); setTotalSeconds(null); };
+
+      const formatCountdown = (s) => {
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        if (h > 0) return `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+        return `${m}:${String(sec).padStart(2,"0")}`;
+      };
+
+      const progress = totalSeconds && remaining != null ? ((totalSeconds - remaining) / totalSeconds) * 100 : 0;
+      const isFinished = remaining === 0 && totalSeconds;
+
+      return (
+        <div style={{background:isFinished?"linear-gradient(135deg,#fef3c7,#fde68a)":"white",borderRadius:"16px",padding:"14px 16px",border:isFinished?"1px solid #fbbf24":"1px solid #e2e8f0",transition:"all 0.3s ease"}}>
+          <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"12px"}}>
+            <span style={{fontSize:"18px"}}>⏱️</span>
+            <span style={{fontFamily:F,fontSize:"13px",fontWeight:700,color:"#334155"}}>Timer</span>
+          </div>
+          {remaining == null ? (
+            <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+              <div style={{display:"flex",alignItems:"center",gap:"4px",flex:1}}>
+                <input type="number" value={hours} onChange={e=>setHours(e.target.value)} placeholder="0" min="0" max="23" style={{width:"50px",padding:"10px 8px",border:"2px solid #e2e8f0",borderRadius:"10px",fontFamily:F,fontSize:"16px",fontWeight:600,outline:"none",textAlign:"center",color:"#334155"}} />
+                <span style={{fontFamily:F,fontSize:"12px",color:"#94a3b8",fontWeight:600}}>h</span>
+                <input type="number" value={minutes} onChange={e=>setMinutes(e.target.value)} placeholder="0" min="0" max="59" style={{width:"50px",padding:"10px 8px",border:"2px solid #e2e8f0",borderRadius:"10px",fontFamily:F,fontSize:"16px",fontWeight:600,outline:"none",textAlign:"center",color:"#334155"}} />
+                <span style={{fontFamily:F,fontSize:"12px",color:"#94a3b8",fontWeight:600}}>m</span>
+              </div>
+              <button onClick={handleStart} style={{padding:"10px 20px",border:"none",borderRadius:"10px",background:"linear-gradient(135deg,#3b82f6,#2563eb)",color:"white",fontFamily:F,fontSize:"13px",fontWeight:700,cursor:"pointer"}}>Start</button>
+            </div>
+          ) : (
+            <div>
+              {/* Progress bar */}
+              <div style={{width:"100%",height:"6px",background:"#e2e8f0",borderRadius:"3px",marginBottom:"12px",overflow:"hidden"}}>
+                <div style={{width:`${progress}%`,height:"100%",background:isFinished?"#f59e0b":"linear-gradient(90deg,#3b82f6,#2563eb)",borderRadius:"3px",transition:"width 0.5s ease"}} />
+              </div>
+              <div style={{textAlign:"center",marginBottom:"12px"}}>
+                <span style={{fontFamily:F,fontSize:"36px",fontWeight:700,color:isFinished?"#92400e":remaining<=10?"#dc2626":"#0f172a",transition:"color 0.3s ease"}}>
+                  {isFinished ? "Done! ⏰" : formatCountdown(remaining)}
+                </span>
+              </div>
+              <div style={{display:"flex",gap:"8px",justifyContent:"center"}}>
+                {running ? (
+                  <button onClick={handleStop} style={{padding:"8px 20px",border:"none",borderRadius:"10px",background:"#fee2e2",color:"#dc2626",fontFamily:F,fontSize:"12px",fontWeight:700,cursor:"pointer"}}>Pause</button>
+                ) : !isFinished ? (
+                  <button onClick={()=>{endTimeRef.current=Date.now()+remaining*1000;setRunning(true);}} style={{padding:"8px 20px",border:"none",borderRadius:"10px",background:"linear-gradient(135deg,#3b82f6,#2563eb)",color:"white",fontFamily:F,fontSize:"12px",fontWeight:700,cursor:"pointer"}}>Resume</button>
+                ) : null}
+                <button onClick={handleReset} style={{padding:"8px 20px",border:"none",borderRadius:"10px",background:"#f1f5f9",color:"#64748b",fontFamily:F,fontSize:"12px",fontWeight:700,cursor:"pointer"}}>Reset</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // --- Main App ---
+    function App() {
+      const [state, setState] = useState(null);
+      const [pulse, setPulse] = useState(false);
+      const [now, setNow] = useState(Date.now());
+
+      useEffect(()=>{ const id=setInterval(()=>setNow(Date.now()),60000); return ()=>clearInterval(id); },[]);
+
+      useEffect(()=>{
+        const saved = loadState();
+        if (saved) {
+          for (const key of Object.keys(saved.days)) saved.days[key] = migrateDay(saved.days[key]);
+          const today = todayStr();
+          if (!saved.days[today]) saved.days[today] = defaultDay(today);
+          setState(saved);
+        } else {
+          const fresh = defaultState();
+          fresh.days[todayStr()] = defaultDay(todayStr());
+          setState(fresh);
+        }
+      },[]);
+
+      useEffect(()=>{ if(state) saveState(state); },[state]);
+
+      const triggerPulse = useCallback(()=>{ setPulse(true); setTimeout(()=>setPulse(false),500); },[]);
+
+      const updateToday = useCallback((fn)=>{
+        triggerPulse();
+        setState(prev=>{
+          const today=todayStr();
+          const day={...(prev.days[today]||defaultDay(today)),mealTimes:[...(prev.days[today]?.mealTimes||[])],workouts:[...(prev.days[today]?.workouts||[])]};
+          fn(day);
+          const newDays={...prev.days,[today]:day};
+          const streak=getStreak(newDays);
+          return {...prev,days:newDays,longestStreak:Math.max(prev.longestStreak,streak)};
+        });
+      },[triggerPulse]);
+
+      if (!state) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f8fafc"}}><div style={{fontFamily:F,fontSize:"14px",color:"#94a3b8"}}>Loading...</div></div>;
+
+      const today=todayStr(), todayData=state.days[today]||defaultDay(today);
+      const streak=getStreak(state.days), stage=getCreatureStage(streak);
+      const weekDays=getWeekDays(), motivation=getMotivation(streak,todayData);
+      const todayComplete=isDayComplete(todayData);
+      const weightHistory=getWeightHistory(state.days,14);
+      const fastingHistory=getFastingHistory(state.days,14);
+      const lastMealTimestamp=getLastMealTimestamp(state.days);
+
+      const logMealWithFast = () => {
+        updateToday(d => {
+          const lastTs = getLastMealTimestamp(state.days);
+          const fastHours = lastTs ? Math.round(((Date.now() - lastTs) / 3600000) * 10) / 10 : null;
+          d.mealTimes.push(Date.now());
+          if (d.mealTimes.length === 1) d.fastHoursAtMeal = fastHours;
+        });
+      };
+
+      return (
+        <div style={{minHeight:"100vh",background:"#f8fafc",fontFamily:F,padding:"16px",display:"flex",justifyContent:"center"}}>
+          <div style={{width:"100%",maxWidth:"400px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px",padding:"0 4px"}}>
+              <div>
+                <div style={{fontSize:"18px",fontWeight:700,color:"#0f172a",letterSpacing:"0.5px"}}>Accountability</div>
+                <div style={{fontSize:"12px",color:"#94a3b8",marginTop:"2px",fontWeight:500}}>{new Date().toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"})}</div>
+              </div>
+              {state.longestStreak>0 && <div style={{background:"#fef3c7",borderRadius:"10px",padding:"4px 10px",fontSize:"11px",color:"#92400e",fontWeight:700}}>Best: {state.longestStreak}d</div>}
+            </div>
+
+            <div style={{marginBottom:"16px",animation:"fadeSlideIn 0.4s ease"}}><CreatureDisplay stage={stage} streak={streak} pulse={pulse}/></div>
+
+            <div style={{background:todayComplete?"linear-gradient(135deg,#ecfdf5,#d1fae5)":"white",borderRadius:"14px",padding:"12px 16px",marginBottom:"16px",textAlign:"center",border:todayComplete?"1px solid #86efac":"1px solid #e2e8f0"}}>
+              <span style={{fontSize:"12px",color:todayComplete?"#065f46":"#475569",fontWeight:todayComplete?700:500}}>{motivation}</span>
+            </div>
+
+            <div style={{display:"flex",flexDirection:"column",gap:"10px",marginBottom:"16px"}}>
+              <WaterTracker count={todayData.water} onAdd={()=>updateToday(d=>{d.water=Math.min(WATER_TARGET,d.water+1);})} onRemove={()=>updateToday(d=>{d.water=Math.max(0,d.water-1);})}/>
+              <OMADTracker mealTimes={todayData.mealTimes||[]} onLogMeal={logMealWithFast} onRemoveMeal={(idx)=>updateToday(d=>{d.mealTimes.splice(idx,1);})} onEditMeal={(idx,ts)=>updateToday(d=>{d.mealTimes[idx]=ts;})} lastMealTimestamp={lastMealTimestamp} now={now} fastingHistory={fastingHistory}/>
+              <WorkoutTracker workouts={todayData.workouts||[]} onToggle={(type)=>updateToday(d=>{const idx=d.workouts.indexOf(type);if(idx>=0)d.workouts.splice(idx,1);else d.workouts.push(type);})}/>
+              <WeightTracker todayWeight={todayData.weight} onLog={(val)=>{updateToday(d=>{d.weight=val;}); if(!state.startWeight) setState(prev=>({...prev,startWeight:val}));}} weightHistory={weightHistory} startWeight={state.startWeight}/>
+            </div>
+
+            {/* This Week */}
+            <div style={{background:"white",borderRadius:"16px",padding:"14px 16px",border:"1px solid #e2e8f0",marginBottom:"10px"}}>
+              <div style={{fontSize:"11px",fontWeight:700,color:"#64748b",marginBottom:"10px",letterSpacing:"0.5px"}}>This Week</div>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                {weekDays.map((wd)=>{
+                  const dayData=state.days[wd.key]?migrateDay(state.days[wd.key]):null;
+                  const complete=dayData&&isDayComplete(dayData);
+                  const broke=dayData&&mealCount(dayData)>OMAD_LIMIT;
+                  const partial=dayData&&(dayData.water>0||hasWorkout(dayData))&&!broke;
+                  const isToday=wd.key===today, isFuture=wd.key>today;
+                  return (
+                    <div key={wd.key} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"4px"}}>
+                      <span style={{fontSize:"9px",fontWeight:isToday?700:500,color:isToday?"#0f172a":"#94a3b8"}}>{wd.day}</span>
+                      <div style={{width:"34px",height:"34px",borderRadius:"10px",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"14px",
+                        background:isFuture?"#f8fafc":complete?"linear-gradient(135deg,#10b981,#059669)":broke?"#fee2e2":partial?"#fef3c7":isToday?"#f1f5f9":"#f8fafc",
+                        color:complete?"white":broke?"#dc2626":"#94a3b8",
+                        border:isToday&&!complete?"2px solid #cbd5e1":"1px solid transparent",
+                      }}>{isFuture?"":complete?"✓":broke?"✗":partial?"◐":isToday?"·":""}</div>
+                      <span style={{fontSize:"9px",fontWeight:isToday?700:500,color:isToday?"#0f172a":"#b0b8c4"}}>{wd.date}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Countdown */}
+            <div style={{marginBottom:"16px"}}><CountdownTimer /></div>
+
+            <div style={{textAlign:"center",marginTop:"8px",marginBottom:"24px"}}>
+              <button onClick={()=>{if(confirm("Reset all progress? This can't be undone.")){const fresh=defaultState();fresh.days[todayStr()]=defaultDay(todayStr());setState(fresh);clearState();}}} style={{background:"none",border:"none",fontSize:"10px",color:"#cbd5e1",cursor:"pointer",fontFamily:F,fontWeight:600}}>Reset All Data</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('./sw.js');
+      });
+    }
+  </script>
+</body>
+</html>
